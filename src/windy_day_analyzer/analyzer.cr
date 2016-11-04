@@ -1,4 +1,6 @@
 class WindyDayAnalyzer::Analyzer
+  GNUPLOT_TIME_SCHEME = "%Y-%m-%d_%H:%M:%S"
+
   def initialize(@path : String)
     @batt_u_path = File.join([@path, "buffer_batt_u.txt"])
     @coil_path = File.join([@path, "buffer_coil_1_u.txt"])
@@ -108,6 +110,20 @@ class WindyDayAnalyzer::Analyzer
   end
 
   def current_graph
+    prepare_current_graph
+
+    gc = [
+      "set datafile separator \",\"",
+      "plot \"data.dat\""
+    ]
+
+    command = "gnuplot5 -e #{gc.join("; ")} -p"
+
+    puts command
+    `#{command}`
+  end
+
+  def prepare_current_graph
     get_idle_current_error
 
     r = process_raw_file(
@@ -115,22 +131,30 @@ class WindyDayAnalyzer::Analyzer
       offset: @current_offset,
       linear: @current_linear
     )
-    #index_a = r[:index]
-    time_a = r[:time]
-    value_a = r[:value]
-
+    times = r[:time]
+    currents = r[:value]
     # fix current offset
-    value_a = value_a.map{|v| v - @current_error}
+    currents = currents.map{|v| v - @current_error}
 
-    f = File.new("data.dat", "w")
-    f.puts "#Time\tCurrent"
+    r = process_raw_file(
+      path: @coil_path,
+      offset: @voltage_offset,
+      linear: @voltage_linear
+    )
+    coil_voltages = r[:value]
 
-    time_a.each_with_index do |t, i|
-      ts = t.to_s("%Y-%m-%d %H:%M:%S")
-      v = value_a[i]
-      v = 0.0 if v < 0.0 # no negative current
+    f = File.new("gnuplot/data.dat", "w")
+    f.puts "#Index\tTime\tCurrent\tCoil voltage"
 
-      f.puts "#{ts}\t#{v}"
+    times.each_with_index do |t, i|
+      ts = t.to_s(GNUPLOT_TIME_SCHEME)
+
+      cv = currents[i]
+      cv = 0.0 if cv < 0.0 # no negative current
+
+      coil = coil_voltages[i]
+
+      f.puts "#{i}\t#{ts}\t#{cv}\t#{coil}"
 
       if i % 50_000 == 0
         puts i
