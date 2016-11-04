@@ -10,6 +10,8 @@ class WindyDayAnalyzer::Analyzer
 
     @current_linear = 0.191
     @current_offset = -512
+
+    @current_error = 0.0
   end
 
   def load_meas_buffer(path : String)
@@ -45,29 +47,80 @@ class WindyDayAnalyzer::Analyzer
     }
   end
 
-  def current_graph
-    d = load_meas_buffer(@i_gen_batt_path)
+  def process_raw_file(path, offset : Int32, linear : Float64, max : Float64 = 100.0 )
+    d = load_meas_buffer(path)
 
+    index_a = Array(Int32).new
     time_a = Array(Time).new
     value_a = Array(Float64).new
 
     last_v = 0.0
     d["data"].each_with_index do |r, i|
       t = Time.epoch_ms(d["time_from"].epoch_ms + i.to_i64 * d["interval"])
-      v = (r.to_f + @current_offset.to_f) * @current_linear
+      v = (r.to_f + offset.to_f) * linear
 
       # remove spikes
-      v = last_v if v > 100.0
-      last_v = v if v < 100.0
+      v = last_v if v > max
+      last_v = v if v < max
 
+      index_a << i
       time_a << t
       value_a << v
     end
 
+    {index: index_a, time: time_a, value: value_a}
+  end
+
+  def get_idle_current_error
+    coil_data = process_raw_file(
+      path: @coil_path,
+      offset: @voltage_offset,
+      linear: @voltage_linear
+    )
+
+    # where wind turbine was idle - no rotation
+    idle_indexes = Array(Int32).new
+
+    cv = coil_data[:value]
+    cv.each_with_index do |v, i|
+      idle_indexes << i if v < 2.0
+    end
+
+    # select idle current values
+
+    # where wind turbine was idle - no rotation
+    idle_currents = Array(Float64).new
+
+    current_data = process_raw_file(
+      path: @i_gen_batt_path,
+      offset: @current_offset,
+      linear: @current_linear
+    )
+    # add values to temp array
+    idle_indexes.each do |i|
+      idle_currents << current_data[:value][i]
+    end
+
+    # return max because we do not want
+    # have constant positive current
+    @current_error = idle_currents.max
+    return @current_error
+  end
+
+  def current_graph
+    get_idle_current_error
+
+    r = process_raw_file(
+      path: @i_gen_batt_path,
+      offset: @current_offset,
+      linear: @current_linear
+    )
+    #index_a = r[:index]
+    time_a = r[:time]
+    value_a = r[:value]
+
     # fix current offset
-    v_min = value_a.min
-    value_a = value_a.map{|v| v - v_min}
-    puts "fixed offset #{v_min}"
+    value_a = value_a.map{|v| v - @current_error}
 
     f = File.new("data.dat", "w")
     f.puts "#Time\tCurrent"
@@ -75,6 +128,7 @@ class WindyDayAnalyzer::Analyzer
     time_a.each_with_index do |t, i|
       ts = t.to_s("%Y-%m-%d %H:%M:%S")
       v = value_a[i]
+      v = 0.0 if v < 0.0 # no negative current
 
       f.puts "#{ts}\t#{v}"
 
@@ -84,9 +138,6 @@ class WindyDayAnalyzer::Analyzer
     end
 
     f.close
-
-
-    #puts d.inspect
 
   end
 end
