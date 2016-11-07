@@ -1,9 +1,11 @@
 class WindyDayAnalyzer::Analyzer
   GNUPLOT_TIME_SCHEME = "%Y-%m-%d_%H:%M:%S"
 
-  def initialize(@path : String)
+  def initialize(@path : String, @stats_time_window : Time::Span = Time::Span.new(0, 0, 30))
     @batt_u_path = File.join([@path, "buffer_batt_u.txt"])
-    @coil_path = File.join([@path, "buffer_coil_1_u.txt"])
+    @coil1_path = File.join([@path, "buffer_coil_1_u.txt"])
+    @coil2_path = File.join([@path, "buffer_coil_2_u.txt"])
+    @coil3_path = File.join([@path, "buffer_coil_3_u.txt"])
     @i_gen_batt_path = File.join([@path, "buffer_i_gen_batt.txt"])
     @imp_per_min_path = File.join([@path, "buffer_imp_per_min.txt"])
 
@@ -49,17 +51,30 @@ class WindyDayAnalyzer::Analyzer
     }
   end
 
-  def process_raw_file(path, offset : Int32, linear : Float64, max : Float64 = 100.0 )
+  def process_raw_file(
+      path : String,
+      offset : Int32,
+      linear : Float64,
+      max : Float64 = 100.0,
+      stats_time_window = @stats_time_window,
+      stats : Bool = false,
+      real_offset : Float64 = 0.0,
+    )
     d = load_meas_buffer(path)
 
     index_a = Array(Int32).new
     time_a = Array(Time).new
     value_a = Array(Float64).new
 
+    avg_a = Array(Float64).new
+    min_a = Array(Float64).new
+    max_a = Array(Float64).new
+
     last_v = 0.0
     d["data"].each_with_index do |r, i|
       t = Time.epoch_ms(d["time_from"].epoch_ms + i.to_i64 * d["interval"])
       v = (r.to_f + offset.to_f) * linear
+      v += real_offset # fix current sensor
 
       # remove spikes
       v = last_v if v > max
@@ -70,12 +85,36 @@ class WindyDayAnalyzer::Analyzer
       value_a << v
     end
 
-    {index: index_a, time: time_a, value: value_a}
+    if stats
+      stats_count_window = stats_time_window.total_milliseconds.to_i64 / d["interval"].to_i64
+
+      max = d["data"].size - 1
+      d["data"].each_with_index do |r, i|
+        f = i - (stats_count_window / 2)
+        t = i + (stats_count_window / 2)
+
+        f = 0 if f < 0
+        t = max if t > max
+
+        sa = value_a[f..t]
+        if sa.size == 0
+          avg = 0.0
+        else
+          avg = (sa.sum / sa.size)
+        end
+
+        avg_a << avg
+        min_a << sa.min
+        max_a << sa.max
+      end
+    end
+
+    {index: index_a, time: time_a, value: value_a, avg: avg_a, min: min_a, max: max_a}
   end
 
   def get_idle_current_error
     coil_data = process_raw_file(
-      path: @coil_path,
+      path: @coil1_path,
       offset: @voltage_offset,
       linear: @voltage_linear
     )
@@ -110,26 +149,34 @@ class WindyDayAnalyzer::Analyzer
   end
 
   def current_graph
+    puts "Start"
+    get_idle_current_error
+    puts "Idle current error"
     prepare_current_graph
+    puts "Summary data"
+    prepare_current_stats_graph
+    puts "Detailed stats data"
 
     gc = [
       "set datafile separator \",\"",
       "plot \"data.dat\""
     ]
 
-    command = "gnuplot5 -e #{gc.join("; ")} -p"
+    command = "gnuplot5 gnuplot/*.gnu"
 
     puts command
     `#{command}`
   end
 
-  def prepare_current_graph
-    get_idle_current_error
 
+
+  def prepare_current_graph
     r = process_raw_file(
       path: @i_gen_batt_path,
       offset: @current_offset,
-      linear: @current_linear
+      linear: @current_linear,
+      max: 30.0,
+      stats: false
     )
     times = r[:time]
     currents = r[:value]
@@ -137,24 +184,83 @@ class WindyDayAnalyzer::Analyzer
     currents = currents.map{|v| v - @current_error}
 
     r = process_raw_file(
-      path: @coil_path,
+      path: @coil1_path,
       offset: @voltage_offset,
-      linear: @voltage_linear
+      linear: @voltage_linear,
+      max: 120.0
     )
-    coil_voltages = r[:value]
+    coil1_voltages = r[:value]
+    r = process_raw_file(
+      path: @coil2_path,
+      offset: @voltage_offset,
+      linear: @voltage_linear,
+      max: 120.0
+    )
+    coil2_voltages = r[:value]
+    r = process_raw_file(
+      path: @coil3_path,
+      offset: @voltage_offset,
+      linear: @voltage_linear,
+      max: 120.0
+    )
+    coil3_voltages = r[:value]
 
-    f = File.new("gnuplot/data.dat", "w")
-    f.puts "#Index\tTime\tCurrent\tCoil voltage"
+    r = process_raw_file(
+      path: @batt_u_path,
+      offset: @voltage_offset,
+      linear: @voltage_linear,
+      max: 80.0
+    )
+    batt_voltages = r[:value]
+
+    r = process_raw_file(
+      path: @imp_per_min_path,
+      offset: 0,
+      linear: 1.0,
+      max: 500.0
+    )
+    impulses = r[:value]
+
+
+    f = File.new("gnuplot/data/data.dat", "w")
+    f.puts "#Index\tTime\tCurrent\tCoil1\tCoil2\tCoil3\tBatt voltage\tImpulses\t"
 
     times.each_with_index do |t, i|
       ts = t.to_s(GNUPLOT_TIME_SCHEME)
 
-      cv = currents[i]
-      cv = 0.0 if cv < 0.0 # no negative current
+      s = "#{i}\t#{ts}\t"
 
-      coil = coil_voltages[i]
+      if currents[i]?
+        cv = currents[i]
+        cv = 0.0 if cv < 0.0 # no negative current
+        s += "#{cv}"
+      end
+      s += "\t"
 
-      f.puts "#{i}\t#{ts}\t#{cv}\t#{coil}"
+      if coil1_voltages[i]?
+        s += "#{coil1_voltages[i]}"
+      end
+      s += "\t"
+      if coil2_voltages[i]?
+        s += "#{coil2_voltages[i]}"
+      end
+      s += "\t"
+      if coil3_voltages[i]?
+        s += "#{coil3_voltages[i]}"
+      end
+      s += "\t"
+
+      if batt_voltages[i]?
+        s += "#{batt_voltages[i]}"
+      end
+      s += "\t"
+
+      if impulses[i]?
+        s += "#{impulses[i]}"
+      end
+      s += "\t"
+
+      f.puts(s)
 
       if i % 50_000 == 0
         puts i
@@ -162,6 +268,76 @@ class WindyDayAnalyzer::Analyzer
     end
 
     f.close
+
+  end
+
+  def prepare_stats_data(
+    path : String,
+    offset : Int32,
+    linear : Float64,
+    max : Float64,
+    real_offset : Float64 = 0.0,
+    name : String = "default",
+    stats_time_window : Time::Span = @stats_time_window
+    )
+
+    r = process_raw_file(
+      path: path,
+      offset: offset,
+      linear: linear,
+      max: max,
+      stats_time_window: stats_time_window,
+      stats: true,
+      real_offset: real_offset
+    )
+    times = r[:time]
+    values = r[:value]
+
+    f = File.new("gnuplot/data/stats_#{name}_#{stats_time_window.total_milliseconds}.dat", "w")
+    f.puts "#Index\tTime\Value\tAvg\tMin\tMax"
+
+    times.each_with_index do |t, i|
+      ts = t.to_s(GNUPLOT_TIME_SCHEME)
+
+      s = "#{i}\t#{ts}\t"
+
+      v = r[:value][i]
+      s += "#{v}"
+      s += "\t"
+
+      v = r[:avg][i]
+      s += "#{v}"
+      s += "\t"
+
+      v = r[:min][i]
+      s += "#{v}"
+      s += "\t"
+
+      v = r[:max][i]
+      s += "#{v}"
+      s += "\t"
+
+      f.puts(s)
+
+      if i % 50_000 == 0
+        puts i
+      end
+    end
+
+    f.close
+
+  end
+
+  def prepare_current_stats_graph
+    prepare_stats_data(
+      path: @i_gen_batt_path,
+      offset: @current_offset,
+      linear: @current_linear,
+      max: 30.0,
+      real_offset: -1.0 * @current_error,
+      name: "charg_current",
+      stats_time_window: Time::Span.new(0, 0, 10)
+    )
 
   end
 end

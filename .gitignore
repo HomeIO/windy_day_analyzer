@@ -6,3 +6,5 @@
 
 /gnuplot/*.png
 /gnuplot/data.dat
+/gnuplot/data
+/gnuplot/graphs
