@@ -5,4 +5,5 @@ graphs:
 	done
 
 clean:
-	rm gnuplot/*.png
+	rm gnuplot/graphs/*.png ;
+	rm gnuplot/data/*.dat ;
