@@ -65,6 +65,7 @@ class WindyDayAnalyzer::Analyzer
                        max : Float64 = 100.0,
                        stats_time_window = @stats_time_window,
                        stats : Bool = false,
+                       short : Bool = false,
                        real_offset : Float64 = 0.0)
     d = load_meas_buffer(path)
 
@@ -72,6 +73,8 @@ class WindyDayAnalyzer::Analyzer
     time_a = Array(Time).new
     value_a = Array(Float64).new
 
+    stat_time_a = Array(Time).new
+    stat_index_a = Array(Int32).new
     avg_a = Array(Float64).new
     min_a = Array(Float64).new
     max_a = Array(Float64).new
@@ -96,7 +99,8 @@ class WindyDayAnalyzer::Analyzer
       stats_count_window = stats_time_window.total_milliseconds.to_i64 / d["interval"].to_i64
 
       max = d["data"].size - 1
-      d["data"].each_with_index do |r, i|
+      i = 0
+      while i < max
         f = i - (stats_count_window / 2)
         t = i + (stats_count_window / 2)
 
@@ -110,13 +114,28 @@ class WindyDayAnalyzer::Analyzer
           avg = (sa.sum / sa.size)
         end
 
+        stat_index_a << i
+        stat_time_a << time_a[i]
         avg_a << avg
         min_a << sa.min
         max_a << sa.max
+
+        # short=true - only return rows with calculated stats
+        # short=false - return all rows
+        # stats=true - calculate stats
+        if short
+          i += stats_count_window
+        else
+          i += 1
+        end
       end
+    else
+      # use regular
+      stat_index_a = index_a
+      stat_time_a = time_a
     end
 
-    {index: index_a, time: time_a, value: value_a, avg: avg_a, min: min_a, max: max_a, stats_count_window: stats_count_window}
+    {index: stat_index_a, time: stat_time_a, value: value_a, avg: avg_a, min: min_a, max: max_a, stats_count_window: stats_count_window}
   end
 
   def get_idle_current_error
@@ -160,26 +179,26 @@ class WindyDayAnalyzer::Analyzer
     return @current_error
   end
 
-  def current_graph
-    get_idle_current_error
-    puts "Idle current error"
-    prepare_current_graph
-    puts "Summary data"
-    prepare_current_stats_graph
-    puts "Detailed stats data"
+  # def current_graph
+  #   get_idle_current_error
+  #   puts "Idle current error"
+  #   prepare_current_graph
+  #   puts "Summary data"
+  #   prepare_current_stats_graph
+  #   puts "Detailed stats data"
+  #
+  #   gc = [
+  #     "set datafile separator \",\"",
+  #     "plot \"data.dat\"",
+  #   ]
+  #
+  #   command = "gnuplot5 gnuplot/*.gnu"
+  #
+  #   puts command
+  #   `#{command}`
+  # end
 
-    gc = [
-      "set datafile separator \",\"",
-      "plot \"data.dat\"",
-    ]
-
-    command = "gnuplot5 gnuplot/*.gnu"
-
-    puts command
-    `#{command}`
-  end
-
-  def prepare_current_graph
+  def prepare_total_summary_data
     r = process_raw_file(
       path: @i_gen_batt_path,
       offset: @current_offset,
@@ -226,13 +245,14 @@ class WindyDayAnalyzer::Analyzer
       path: @imp_per_min_path,
       offset: 0,
       linear: 1.0,
-      max: 500.0
+      max: 2000.0
     )
     impulses = r[:value]
 
     f = File.new("gnuplot/data/data.dat", "w")
     f.puts "#Index\tTime\tCurrent\tCoil1\tCoil2\tCoil3\tBatt voltage\tImpulses\t"
 
+    max_size = times.size
     times.each_with_index do |t, i|
       ts = t.to_s(GNUPLOT_TIME_SCHEME)
 
@@ -271,7 +291,7 @@ class WindyDayAnalyzer::Analyzer
       f.puts(s)
 
       if i % 50_000 == 0
-        puts i
+        @logger.info("prepare_total_summary_data - #{i}/#{max_size}")
       end
     end
 
@@ -286,8 +306,7 @@ class WindyDayAnalyzer::Analyzer
                          real_offset : Float64 = 0.0,
                          name : String = "default",
                          stats_time_window : Time::Span = @stats_time_window,
-                         short : Bool = true,
-                         full : Bool = false)
+                         short : Bool = true)
 
     @logger.info("prepare_stats_data START - #{name}/#{stats_time_window.total_seconds}s")
 
@@ -298,6 +317,7 @@ class WindyDayAnalyzer::Analyzer
       max: max,
       stats_time_window: stats_time_window,
       stats: true,
+      short: short,
       real_offset: real_offset
     )
     times = r[:time]
@@ -305,84 +325,45 @@ class WindyDayAnalyzer::Analyzer
 
     @logger.info("prepare_stats_data GOT DATA - #{name}/#{stats_time_window.total_seconds}s")
 
-    if full
-      f = File.new("gnuplot/data/stats_#{name}_#{stats_time_window.total_milliseconds}.dat", "w")
-      f.puts "#Index\tTime\Value\tAvg\tMin\tMax"
+    suffix = short ? "short" : "full"
+    f = File.new("gnuplot/data/stats_#{name}_#{stats_time_window.total_milliseconds.to_i}_#{suffix}.dat", "w")
+    f.puts "#Index\tTime\Value\tAvg\tMin\tMax"
 
-      max_size = times.size
-      times.each_with_index do |t, i|
-        ts = t.to_s(GNUPLOT_TIME_SCHEME)
+    max_size = times.size
+    last_verbose_at = 0
 
-        s = "#{i}\t#{ts}\t"
+    times.each_with_index do |t, i|
+      ts = t.to_s(GNUPLOT_TIME_SCHEME)
 
-        v = r[:value][i]
-        s += "#{v}"
-        s += "\t"
+      s = "#{i}\t#{ts}\t"
 
-        v = r[:avg][i]
-        s += "#{v}"
-        s += "\t"
+      v = r[:value][i]
+      s += "#{v}"
+      s += "\t"
 
-        v = r[:min][i]
-        s += "#{v}"
-        s += "\t"
+      v = r[:avg][i]
+      s += "#{v}"
+      s += "\t"
 
-        v = r[:max][i]
-        s += "#{v}"
-        s += "\t"
+      v = r[:min][i]
+      s += "#{v}"
+      s += "\t"
 
-        f.puts(s)
+      v = r[:max][i]
+      s += "#{v}"
+      s += "\t"
 
-        if i % 50_000 == 0
-          @logger.info("prepare_stats_data FULL - #{name}/#{stats_time_window.total_seconds}s - #{i}/#{max_size}")
-        end
+      f.puts(s)
+
+      if 100 * (i - last_verbose_at) / max_size > 10
+        @logger.info("prepare_stats_data - #{name}/#{stats_time_window.total_seconds}s - #{i}/#{max_size}")
+        last_verbose_at = i
       end
-
-      f.close
     end
 
-    if short
-      # short
-      f = File.new("gnuplot/data/stats_#{name}_#{stats_time_window.total_milliseconds}_short.dat", "w")
-      f.puts "#Index\tTime\tAvg\tMin\tMax"
+    f.close
 
-      i = 0
-      j = 0
-      max_size = times.size / r["stats_count_window"].as(Int64)
-
-      while j < times.size
-        t = times[j]
-        ts = t.to_s(GNUPLOT_TIME_SCHEME)
-
-        s = "#{i}\t#{ts}\t"
-
-        v = r[:avg][j]
-        s += "#{v}"
-        s += "\t"
-
-        v = r[:min][j]
-        s += "#{v}"
-        s += "\t"
-
-        v = r[:max][j]
-        s += "#{v}"
-        s += "\t"
-
-        f.puts(s)
-
-        if i % 10_000 == 0
-          @logger.info("prepare_stats_data SHORT - #{name}/#{stats_time_window.total_seconds}s - #{i}/#{max_size}")
-        end
-
-        i += 1
-        j += r["stats_count_window"].as(Int64)
-      end
-
-      f.close
-    end
-
-    @logger.info("prepare_stats_data END - #{name}/#{stats_time_window.total_seconds}s")                     
-
+    @logger.info("prepare_stats_data END - #{name}/#{stats_time_window.total_seconds}s")
   end
 
   def prepare_current_stats_graph

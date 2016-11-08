@@ -1,5 +1,5 @@
 graphs:
-	for file in $$(find ./gnuplot/ -iname '*.gnu'); do \
+	for file in $$(find ./gnuplot/ -maxdepth 1 -iname '*.gnu'); do \
 		gnuplot "$$file"; \
 		echo $$file ; \
 	done
