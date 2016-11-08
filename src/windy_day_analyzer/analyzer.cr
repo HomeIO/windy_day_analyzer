@@ -172,7 +172,6 @@ class WindyDayAnalyzer::Analyzer
 
     @logger.info("End idle current error")
 
-
     # return max because we do not want
     # have constant positive current
     @current_error = idle_currents.max
@@ -198,7 +197,9 @@ class WindyDayAnalyzer::Analyzer
   #   `#{command}`
   # end
 
-  def prepare_total_summary_data
+  def prepare_total_summary_data(name : String = "")
+    fn = "gnuplot/data/data_#{name}.dat"
+    return if File.exists?(fn)
     r = process_raw_file(
       path: @i_gen_batt_path,
       offset: @current_offset,
@@ -249,7 +250,7 @@ class WindyDayAnalyzer::Analyzer
     )
     impulses = r[:value]
 
-    f = File.new("gnuplot/data/data.dat", "w")
+    f = File.new(fn, "w")
     f.puts "#Index\tTime\tCurrent\tCoil1\tCoil2\tCoil3\tBatt voltage\tImpulses\t"
 
     max_size = times.size
@@ -307,6 +308,9 @@ class WindyDayAnalyzer::Analyzer
                          name : String = "default",
                          stats_time_window : Time::Span = @stats_time_window,
                          short : Bool = true)
+    suffix = short ? "short" : "full"
+    fn = "gnuplot/data/stats_#{name}_#{stats_time_window.total_milliseconds.to_i}_#{suffix}.dat"
+    return if File.exists?(fn)
 
     @logger.info("prepare_stats_data START - #{name}/#{stats_time_window.total_seconds}s")
 
@@ -325,8 +329,7 @@ class WindyDayAnalyzer::Analyzer
 
     @logger.info("prepare_stats_data GOT DATA - #{name}/#{stats_time_window.total_seconds}s")
 
-    suffix = short ? "short" : "full"
-    f = File.new("gnuplot/data/stats_#{name}_#{stats_time_window.total_milliseconds.to_i}_#{suffix}.dat", "w")
+    f = File.new(fn, "w")
     f.puts "#Index\tTime\Value\tAvg\tMin\tMax"
 
     max_size = times.size
